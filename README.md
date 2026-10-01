@@ -14,15 +14,19 @@ This is not a proof. The ELF is not executed. `node/vm` `process_transaction` on
 
 [STP-KAS/quiet-lane](https://github.com/STP-KAS/quiet-lane) is a separate model of the settler wake. It does not call this guest.
 
-## How
+## Test
 
-`vprogs/` is a checkout of kaspanet/vprogs `f9b84a863a7c7c20586a9cf947550475e894f72e`, under the ISC license in `vprogs/LICENSE`. One member was added: `examples/host-check`, plus that members line and the lock entries it needs. The rest of that tree is the upstream checkout. Upstream does not track this repository.
+Repository: https://github.com/STP-KAS/vprog-runtime-test
 
 ```
+git clone https://github.com/STP-KAS/vprog-runtime-test.git
+cd vprog-runtime-test
 cargo test -p vprog-runtime-test --manifest-path vprogs/Cargo.toml
 ```
 
-On 1 Oct 2026 that command passed 3 tests: a 50 to 7 transfer of 20 lands at 30 and 27, a transfer of 51 is a guest error, and a transfer whose two indexes are both 0 is a guest error.
+A pass is `3 passed`. Balances 50 and 7, amount 20, land at 30 and 27. Amount 51 is a guest error. Two indexes that are both 0 are a guest error. The first run needs a network so cargo can fetch the locked rusty-kaspa commit. The command submits nothing.
+
+`vprogs/` is a checkout of kaspanet/vprogs `f9b84a863a7c7c20586a9cf947550475e894f72e`, under the ISC license in `vprogs/LICENSE`. One member was added: `examples/host-check`, plus that members line and the lock entries it needs. The rest of that tree is the upstream checkout. Upstream does not track this repository. On 1 Oct 2026 the command above passed those 3 tests.
 
 ## Inconsistencies
 
