@@ -1,0 +1,26 @@
+[package]
+edition.workspace = true
+name              = "vprogs-node-cli"
+version.workspace = true
+
+[[bin]]
+name = "vprogs-node-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace                         = true
+ctrlc.workspace                        = true
+env_logger.workspace                   = true
+figment.workspace                      = true
+kaspa-consensus-core.workspace         = true
+log.workspace                          = true
+serde.workspace                        = true
+tap.workspace                          = true
+vprogs-l1-bridge.workspace             = true
+vprogs-l1-types.workspace              = true
+vprogs-node-framework.workspace        = true
+vprogs-node-vm.workspace               = true
+vprogs-scheduling-scheduler.workspace  = true
+vprogs-storage-manager.workspace       = true
+vprogs-storage-rocksdb-store.workspace = true
+vprogs-storage-types.workspace         = true

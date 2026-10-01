@@ -1,0 +1,4 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-pubkey"
+version.workspace = true

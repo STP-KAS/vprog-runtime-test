@@ -1,0 +1,10 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-program-context"
+version.workspace = true
+
+[dependencies]
+vprogs-transaction-runtime-address.workspace            = true
+vprogs-transaction-runtime-authenticated-data.workspace = true
+vprogs-transaction-runtime-data-context.workspace       = true
+vprogs-transaction-runtime-error.workspace              = true

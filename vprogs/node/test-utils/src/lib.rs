@@ -1,0 +1,49 @@
+//! Test utilities for the `node` layer.
+//!
+//! Provides an in-process Kaspa simnet node ([`L1Node`]) and convenience
+//! extensions for the L1 bridge ([`L1BridgeExt`]) to simplify integration
+//! tests.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use std::time::Duration;
+//!
+//! use tokio::sync::mpsc;
+//! use vprogs_l1_bridge::{L1Bridge, L1BridgeConfig, L1Event};
+//! use vprogs_l1_types::{NetworkId, NetworkType};
+//! use vprogs_node_test_utils::{L1BridgeExt, L1Node};
+//!
+//! # async fn example(sink: MySink) {
+//! // Start an isolated simnet node.
+//! let node = L1Node::new(NetworkId::new(NetworkType::Simnet), None).await;
+//!
+//! // Connect a bridge that drives `sink` (a `ChainSink`, e.g. the scheduler). API commands flow
+//! // over the channel; mined blocks are scheduled directly into the sink, not surfaced as events.
+//! let (_api_tx, api_rx) = mpsc::channel(16);
+//! let bridge = L1Bridge::new(
+//!     L1BridgeConfig::default()
+//!         .with_url(Some(node.wrpc_borsh_url()))
+//!         .with_network_type(NetworkType::Simnet),
+//!     sink,
+//!     api_rx,
+//! );
+//!
+//! // Wait for the bridge to connect, then mine; the bridge schedules the blocks into `sink`.
+//! bridge.wait_for(Duration::from_secs(10), |e| matches!(e, L1Event::Connected)).await;
+//! node.mine_blocks(5).await;
+//!
+//! bridge.shutdown();
+//! node.shutdown().await;
+//! # }
+//! ```
+
+mod l1_bridge_ext;
+mod l1_node;
+mod node_ext;
+mod vm;
+
+pub use l1_bridge_ext::L1BridgeExt;
+pub use l1_node::L1Node;
+pub use node_ext::NodeExt;
+pub use vm::TestNodeVm;

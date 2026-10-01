@@ -1,0 +1,359 @@
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::Arc,
+};
+
+use tap::Tap;
+use vprogs_core_types::{ChainSink, Checkpoint, ResourceId, SchedulerTransaction};
+use vprogs_scheduling_execution_workers::ExecutionWorkers;
+use vprogs_state_batch_metadata::BatchMetadata as StoredBatchMetadata;
+use vprogs_storage_canonical_chain::CanonicalChainManager;
+use vprogs_storage_manager::StorageConfig;
+use vprogs_storage_types::Store;
+
+use crate::{
+    BatchLifecycleWorker, CancellationContext, ExecutionConfig, PruningWorker, Read, Resource,
+    ResourceAccess, ScheduledBatch, ScheduledBatchRef, ScheduledTransactionRef, SchedulerError,
+    SchedulerResult, StateDiff, Write, cpu_task::ManagerTask, processor::Processor,
+    rollback::Rollback, state::SchedulerState,
+};
+
+/// Orchestrates transaction execution, state management, and storage coordination.
+///
+/// The scheduler is the main entry point for batch processing. It schedules transactions, manages
+/// resource dependency chains, coordinates parallel execution via worker threads, and handles
+/// rollbacks when chain reorganization occurs.
+pub struct Scheduler<S: Store, P: Processor<S>> {
+    /// The processor used to execute transactions.
+    processor: P,
+    /// Shared scheduler state (storage, eviction_queue, root, last_committed, last_processed).
+    state: SchedulerState<S, P>,
+    /// Shared cancellation state for in-flight batch detection.
+    cancellation: CancellationContext,
+    /// Checkpoints for batches that have not yet committed, in index order.
+    pending_batches: VecDeque<Checkpoint<P::BatchMetadata>>,
+    /// Maps resource IDs to their in-memory dependency chain heads.
+    resources: HashMap<ResourceId, Resource<S, P>>,
+    /// Background worker that processes batches through their lifecycle stages.
+    batch_lifecycle_worker: BatchLifecycleWorker<S, P>,
+    /// Thread pool for parallel transaction execution.
+    execution_workers: ExecutionWorkers<ManagerTask<S, P>, ScheduledBatch<S, P>>,
+    /// Background worker that prunes old state data when the pruning threshold advances.
+    pruning_worker: PruningWorker<S, P>,
+    /// Assigns never-reused batch ids and drives the canonical oracle.
+    canonical_chain_manager: CanonicalChainManager<P::BatchMetadata>,
+}
+
+impl<S: Store, P: Processor<S>> Scheduler<S, P> {
+    /// Creates a new scheduler with the given execution and storage configurations, building a
+    /// fresh shared state (and storage manager) from `storage_config`.
+    pub fn new(execution_config: ExecutionConfig<P>, storage_config: StorageConfig<S>) -> Self {
+        Self::with_state(execution_config, SchedulerState::new(storage_config))
+    }
+
+    /// Creates a new scheduler over a pre-built shared `state`. Use this when the state's storage
+    /// manager must be shared with another component built beforehand: the aggregate prover takes a
+    /// [`ReceiptStore`](crate::ReceiptStore) derived from the same state
+    /// ([`SchedulerState::receipt_store`]), so it must be created before the processor that drives
+    /// it, and thus before this scheduler.
+    pub fn with_state(execution_config: ExecutionConfig<P>, state: SchedulerState<S, P>) -> Self {
+        let (worker_count, processor) = execution_config.unpack();
+        Self {
+            batch_lifecycle_worker: BatchLifecycleWorker::new(),
+            pruning_worker: PruningWorker::new(state.clone()),
+            execution_workers: ExecutionWorkers::new(worker_count),
+            resources: HashMap::new(),
+            pending_batches: VecDeque::new(),
+            cancellation: CancellationContext::new(state.root().index()),
+            canonical_chain_manager: state.storage().store().canonical_chain_manager(),
+            state,
+            processor,
+        }
+    }
+
+    /// Schedules a batch of transactions for execution.
+    ///
+    /// Creates a new `ScheduledBatch`, connects its transactions to resource dependency chains,
+    /// pushes it to the worker loop for lifecycle management, and submits it to execution workers
+    /// for parallel processing. After building resource accesses, processes pending eviction
+    /// requests to clean up resources from committed batches.
+    pub fn schedule(
+        &mut self,
+        metadata: P::BatchMetadata,
+        txs: Vec<SchedulerTransaction<P::Transaction>>,
+    ) -> ScheduledBatch<S, P> {
+        let (checkpoint, restore) = self.next_checkpoint(metadata);
+        ScheduledBatch::new(self, txs, checkpoint, restore).tap(|batch| {
+            // Notify the processor, allowing it to initialize internal caches or buffers.
+            self.processor.on_batch_scheduled(batch);
+
+            // Push to the batch lifecycle worker for lifecycle progression.
+            self.batch_lifecycle_worker.push(batch.clone());
+
+            // Restore a returning committed batch from disk, or connect and execute a new one.
+            if batch.restored() {
+                self.state.storage().submit_read(Read::CommittedBatch(batch.clone()));
+            } else {
+                batch.connect();
+                self.execution_workers.execute(batch.clone());
+            }
+
+            // Process the eviction queue; this batch's resources won't be evicted yet.
+            self.process_eviction_queue();
+        })
+    }
+
+    /// Processes pending eviction requests from committed batches.
+    ///
+    /// For each resource ID in the eviction queue, checks if its last access belongs to a committed
+    /// batch. If so, removes the resource from the cache. Resources that were accessed by a pending
+    /// batch (including the one just scheduled) will have an uncommitted last access and be
+    /// skipped.
+    pub fn process_eviction_queue(&mut self) {
+        while let Some(resource_id) = self.state.eviction_queue().pop() {
+            if let Some(resource) = self.resources.get(&resource_id) {
+                if resource.should_evict() {
+                    self.resources.remove(&resource_id);
+                }
+            }
+        }
+    }
+
+    /// Rolls back the runtime state to the given batch index, returning the target checkpoint. If
+    /// the current state is already at or behind the target, returns the current checkpoint.
+    ///
+    /// Returns [`SchedulerError::PruningConflict`] if pruning has advanced past the rollback target
+    /// and the required rollback pointers have been deleted.
+    pub fn rollback_to(
+        &mut self,
+        target_index: u64,
+    ) -> SchedulerResult<Checkpoint<P::BatchMetadata>> {
+        // Determine the range of batches to roll back.
+        let upper_bound = self.state.last_processed().index();
+
+        // Only perform a rollback if there is state to revert.
+        if upper_bound > target_index {
+            // Stop pruning entering the rollback range; false = it already passed the target.
+            if !self.pruning_worker.pause(target_index) {
+                return Err(SchedulerError::PruningConflict);
+            }
+
+            // Capture the pre-rollback snapshot for a consistent view of what to revert.
+            let snapshot = self.canonical_chain_manager.chain().snapshot();
+
+            // Look up target metadata, cancel in-flight batches, and update shared state.
+            let target = self.cancel_and_rollback(target_index);
+
+            // Submit the rollback command and wait for its completion.
+            let done_signal = Default::default();
+            self.state.storage().submit_write(Write::Rollback(Rollback::new(
+                target.clone(),
+                upper_bound,
+                snapshot,
+                self.state.clone(),
+                &done_signal,
+            )));
+            done_signal.wait_blocking();
+
+            // Rollback complete - allow pruning to resume.
+            self.pruning_worker.unpause();
+
+            // Clear in-memory resource pointers, as their state may no longer be valid.
+            self.resources.clear();
+
+            // Notify the processor of the rollback, allowing it to clear any internal caches.
+            self.processor.on_rollback(target_index);
+
+            Ok(target)
+        } else {
+            Ok((*self.state.last_processed()).clone())
+        }
+    }
+
+    /// Returns a reference to the shared scheduler state.
+    pub fn state(&self) -> &SchedulerState<S, P> {
+        &self.state
+    }
+
+    /// Returns a reference to the processor.
+    pub fn processor(&self) -> &P {
+        &self.processor
+    }
+
+    /// Returns the number of resources currently cached in memory.
+    pub fn cached_resource_count(&self) -> usize {
+        self.resources.len()
+    }
+
+    /// Returns a reference to the pruning worker.
+    pub fn pruning(&self) -> &PruningWorker<S, P> {
+        &self.pruning_worker
+    }
+
+    /// Returns a mutable handle to the canonical-chain manager, the chain's sole writer.
+    pub fn canonical_chain_manager(&mut self) -> &mut CanonicalChainManager<P::BatchMetadata> {
+        &mut self.canonical_chain_manager
+    }
+
+    /// Shuts down the scheduler and all its components.
+    ///
+    /// This stops the pruning worker, batch lifecycle worker, execution workers, and storage
+    /// manager in order.
+    pub fn shutdown(self) {
+        self.pruning_worker.shutdown();
+        self.batch_lifecycle_worker.shutdown();
+        self.execution_workers.shutdown();
+        self.processor.on_shutdown();
+        self.state.storage().shutdown();
+    }
+
+    /// Returns a reference to the cancellation context.
+    pub(crate) fn cancellation(&self) -> &CancellationContext {
+        &self.cancellation
+    }
+
+    /// Builds resource accesses for a transaction by linking it into dependency chains.
+    ///
+    /// For each resource the transaction accesses, this either creates a new dependency chain or
+    /// appends the transaction to an existing one. When a transaction is the first in its batch to
+    /// access a resource, a new state diff is created and added to `state_diffs`.
+    pub(crate) fn resources(
+        &mut self,
+        tx: &SchedulerTransaction<P::Transaction>,
+        scheduled_tx: ScheduledTransactionRef<S, P>,
+        batch: &ScheduledBatchRef<S, P>,
+        state_diffs: &mut Vec<StateDiff<S, P>>,
+        resource_indices: &BTreeMap<ResourceId, u32>,
+    ) -> Vec<ResourceAccess<S, P>> {
+        tx.resources
+            .iter()
+            .map(|access| {
+                // Get or create the resource entry and link this transaction into its chain.
+                self.resources
+                    .entry(access.resource_id)
+                    .or_default()
+                    .access(access, &scheduled_tx, batch, resource_indices[&access.resource_id])
+                    .tap(|access| {
+                        // If this is the first access in the batch, create a state diff.
+                        if access.is_batch_head() {
+                            state_diffs.push(access.state_diff());
+                        }
+                    })
+            })
+            .collect()
+    }
+
+    /// Advances to the next batch, returning its checkpoint and whether it can be restored.
+    fn next_checkpoint(
+        &mut self,
+        metadata: P::BatchMetadata,
+    ) -> (Checkpoint<P::BatchMetadata>, bool) {
+        self.drain_committed();
+
+        let outcome = self.canonical_chain_manager.append(metadata.clone());
+        let checkpoint = Checkpoint::new(outcome.id, metadata);
+        self.state.set_last_processed(Arc::new(checkpoint.clone()));
+        self.pending_batches.push_back(checkpoint.clone());
+
+        // Initialize root on the first batch; default index 0 on a fresh DB or
+        // post-genesis-rollback.
+        if self.state.root().index() == 0 {
+            self.state.set_root(Arc::new(checkpoint.clone()));
+        }
+
+        // A returning id restores if the processor opts in and its state is already on disk.
+        let restore = !outcome.is_new
+            && self.processor.supports_restore()
+            && StoredBatchMetadata::exists(&**self.state.storage().store(), outcome.id);
+
+        (checkpoint, restore)
+    }
+
+    /// Cancels in-flight batches and rolls back shared state to the given index.
+    fn cancel_and_rollback(&mut self, target_index: u64) -> Checkpoint<P::BatchMetadata> {
+        let target = self.lookup_checkpoint(target_index);
+
+        // Cancel in-flight batches first so commit_done() sees it before the state update.
+        self.cancellation.rollback(target_index);
+
+        // Update last_processed; last_committed is corrected by Rollback::execute() (race-free).
+        self.state.set_last_processed(Arc::new(target.clone()));
+
+        // Roll the canonical chain back to the target.
+        self.canonical_chain_manager.rollback(target_index);
+
+        // Pop canceled entries from the tip (after lookup_checkpoint searches the pending queue).
+        while self.pending_batches.back().is_some_and(|cp| cp.index() > target_index) {
+            self.pending_batches.pop_back();
+        }
+
+        target
+    }
+
+    /// Drains committed entries from the front of the pending batch queue.
+    fn drain_committed(&mut self) {
+        let committed = self.state.last_committed().index();
+        while self.pending_batches.front().is_some_and(|cp| cp.index() <= committed) {
+            self.pending_batches.pop_front();
+        }
+    }
+
+    /// Looks up a checkpoint by index, searching the pending batch queue first, then disk.
+    fn lookup_checkpoint(&self, index: u64) -> Checkpoint<P::BatchMetadata> {
+        // Index 0 is the genesis state - no batch exists on disk for it.
+        if index == 0 {
+            return Checkpoint::default();
+        }
+
+        // Search pending batch queue (sorted ascending by index).
+        for cp in &self.pending_batches {
+            if cp.index() == index {
+                return cp.clone();
+            } else if cp.index() > index {
+                break;
+            }
+        }
+
+        // Fall back to disk for committed batches.
+        let store = &**self.state.storage().store();
+        Checkpoint::new(index, StoredBatchMetadata::get(store, index))
+    }
+}
+
+impl<S: Store, P: Processor<S>> ChainSink<P::BatchMetadata, P::Transaction> for Scheduler<S, P> {
+    fn append(
+        &mut self,
+        metadata: P::BatchMetadata,
+        txs: Vec<SchedulerTransaction<P::Transaction>>,
+    ) -> u64 {
+        self.schedule(metadata, txs).checkpoint().index()
+    }
+
+    fn rollback(&mut self, new_tip: u64) {
+        self.rollback_to(new_tip).unwrap();
+    }
+
+    fn finalize(&mut self, below: u64) {
+        // Set the pruning target.
+        self.pruning().set_threshold(below);
+
+        // Finalize up to the point the pruning worker has reached; pruning needs canonical data.
+        self.canonical_chain_manager.finalize(self.state.root().index());
+    }
+
+    fn tip(&self) -> u64 {
+        self.canonical_chain_manager.chain().tip()
+    }
+
+    fn metadata(&self, id: u64) -> Option<P::BatchMetadata> {
+        self.canonical_chain_manager.metadata(id).cloned()
+    }
+
+    fn id(&self, block_hash: &[u8; 32]) -> Option<u64> {
+        self.canonical_chain_manager.id(block_hash)
+    }
+
+    fn shutdown(self) {
+        self.shutdown();
+    }
+}

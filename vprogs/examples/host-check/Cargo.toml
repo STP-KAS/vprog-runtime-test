@@ -1,0 +1,14 @@
+[package]
+name = "vprog-runtime-test"
+edition.workspace = true
+version.workspace = true
+publish = false
+description = "Host check of the runtime-processor guest body at master f9b84a8."
+
+[dependencies]
+vprogs-core-codec = { workspace = true }
+vprogs-core-hashing = { workspace = true }
+vprogs-core-types = { workspace = true }
+vprogs-l1-utils = { workspace = true }
+vprogs-zk-abi = { workspace = true, default-features = false }
+vprogs-zk-backend-risc0-runtime-processor = { path = "../../zk/backend/risc0/runtime-processor" }

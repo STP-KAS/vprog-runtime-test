@@ -1,0 +1,8 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-data"
+version.workspace = true
+
+[dependencies]
+borsh.workspace                              = true
+vprogs-transaction-runtime-address.workspace = true

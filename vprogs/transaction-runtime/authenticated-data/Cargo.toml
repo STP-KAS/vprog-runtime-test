@@ -1,0 +1,7 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-authenticated-data"
+version.workspace = true
+
+[dependencies]
+vprogs-transaction-runtime-data.workspace = true

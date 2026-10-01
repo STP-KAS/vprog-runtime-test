@@ -1,0 +1,41 @@
+[package]
+edition.workspace = true
+name              = "vprogs-scheduling-scheduler"
+version.workspace = true
+
+[dependencies]
+arc-swap.workspace                            = true
+borsh.workspace                               = true
+crossbeam-deque.workspace                     = true
+crossbeam-queue.workspace                     = true
+futures.workspace                             = true
+num_cpus.workspace                            = true
+tap.workspace                                 = true
+thiserror.workspace                           = true
+tokio                                         = { workspace = true, features = ["macros"] }
+vprogs-core-atomics.workspace                 = true
+vprogs-core-hashing.workspace                 = true
+vprogs-core-macros.workspace                  = true
+vprogs-core-smt.workspace                     = true
+vprogs-core-types.workspace                   = true
+vprogs-scheduling-execution-workers.workspace = true
+vprogs-state-batch-metadata.workspace         = true
+vprogs-state-metadata.workspace               = true
+vprogs-state-proof-receipt.workspace          = true
+vprogs-state-ptr-latest.workspace             = true
+vprogs-state-ptr-rollback.workspace           = true
+vprogs-state-version.workspace                = true
+vprogs-storage-canonical-chain.workspace      = true
+vprogs-storage-manager.workspace              = true
+vprogs-storage-types.workspace                = true
+zerocopy.workspace                            = true
+
+[dev-dependencies]
+tempfile.workspace                     = true
+vprogs-core-atomics.workspace          = true
+vprogs-core-test-utils.workspace       = true
+vprogs-core-types.workspace            = true
+vprogs-scheduling-test-utils.workspace = true
+vprogs-state-metadata.workspace        = true
+vprogs-storage-manager.workspace       = true
+vprogs-storage-rocksdb-store.workspace = true

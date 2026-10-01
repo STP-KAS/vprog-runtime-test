@@ -1,0 +1,70 @@
+use std::sync::Arc;
+
+use vprogs_core_types::{AccessMetadata, AccessType};
+use vprogs_state_version::StateVersion;
+use vprogs_storage_types::Store;
+
+use crate::{ResourceAccess, processor::Processor};
+
+/// A handle to a resource's state during transaction execution.
+///
+/// Passed to [`Processor::process_transaction`] so the processor can read and mutate resource
+/// data. On success the changes are committed; on failure they are rolled back.
+pub struct AccessHandle<'a, S: Store, P: Processor<S>> {
+    state_version: Arc<StateVersion>,
+    access: &'a ResourceAccess<S, P>,
+    batch_index: u64,
+}
+
+impl<'a, S: Store, P: Processor<S>> AccessHandle<'a, S, P> {
+    /// Returns the per-batch resource index.
+    #[inline]
+    pub fn resource_index(&self) -> u32 {
+        self.access.resource_index()
+    }
+
+    /// Returns the access metadata for this resource.
+    #[inline]
+    pub fn access_metadata(&self) -> &AccessMetadata {
+        self.access
+    }
+
+    /// Returns the current version number of this resource.
+    pub fn version(&self) -> u64 {
+        self.state_version.version()
+    }
+
+    /// Returns the serialized resource data.
+    #[inline]
+    pub fn data(&self) -> &Vec<u8> {
+        self.state_version.data()
+    }
+
+    /// Returns a mutable reference to the serialized resource data.
+    #[inline]
+    pub fn data_mut(&mut self) -> &mut Vec<u8> {
+        self.state_version.data_mut(self.batch_index)
+    }
+
+    /// Replaces the serialized resource data.
+    #[inline]
+    pub fn set_data(&mut self, data: Vec<u8>) {
+        self.state_version.set_data(self.batch_index, data)
+    }
+
+    pub(crate) fn new(access: &'a ResourceAccess<S, P>, batch_index: u64) -> Self {
+        Self { state_version: access.read_state(), access, batch_index }
+    }
+
+    pub(crate) fn commit_changes(self) {
+        if self.access.access_type == AccessType::Write {
+            self.access.set_written_state(self.state_version.clone());
+        }
+    }
+
+    pub(crate) fn rollback_changes(self) {
+        if self.access.access_type == AccessType::Write {
+            self.access.set_written_state(self.access.read_state());
+        }
+    }
+}

@@ -1,0 +1,38 @@
+[package]
+edition = "2021"
+name    = "vprogs-example-tn10-flow"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "tn10-flow"
+path = "src/main.rs"
+
+[features]
+# `cuda` swaps the RISC0 prover for the GPU one (forwarded to the runner). The proving + settlement
+# path compiles and runs end to end without it (CPU/dev stub proofs), but the on-chain
+# `OpZkPrecompile` only accepts real receipts, so meaningful settlements happen only under `cuda`
+# without `RISC0_DEV_MODE`.
+cuda = ["vprogs-runner/cuda"]
+
+[dependencies]
+# The reusable daemon engine. tn10-flow adds only its activity issuer on top.
+vprogs-runner = { workspace = true }
+
+# vprogs internal, used by the activity issuer.
+vprogs-core-test-utils             = { workspace = true }
+vprogs-core-types                  = { workspace = true }
+vprogs-l1-wallet                   = { workspace = true }
+vprogs-zk-backend-risc0-test-suite = { workspace = true }
+
+# kaspa (same fork pins as the rest of the workspace)
+kaspa-consensus-core = { workspace = true }
+kaspa-core           = { workspace = true }
+kaspa-hashes         = { workspace = true }
+kaspa-wrpc-client    = { workspace = true }
+
+# external
+ctrlc     = { workspace = true }
+log       = { workspace = true }
+secp256k1 = { workspace = true }
+tokio     = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

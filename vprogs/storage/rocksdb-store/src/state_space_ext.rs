@@ -1,0 +1,42 @@
+use rocksdb::ColumnFamilyDescriptor;
+use vprogs_storage_types::StateSpace;
+
+use crate::config::{Config, DefaultConfig};
+
+/// Maps each [`StateSpace`] to its RocksDB column family and per-CF options.
+pub trait StateSpaceExt<C: Config = DefaultConfig> {
+    /// The column-family name backing this state space.
+    fn cf_name(&self) -> &'static str;
+    /// Column-family descriptors for every state space, in enum order.
+    fn all_descriptors() -> Vec<ColumnFamilyDescriptor>;
+}
+
+impl<C: Config> StateSpaceExt<C> for StateSpace {
+    fn cf_name(&self) -> &'static str {
+        match self {
+            StateSpace::StateVersion => "data",
+            StateSpace::StatePtrLatest => "latest_ptr",
+            StateSpace::StatePtrRollback => "rollback_ptr",
+            StateSpace::BatchMetadata => "batch_metadata",
+            StateSpace::Metadata => "metas",
+            StateSpace::SmtNode => "smt_node",
+            StateSpace::SmtStale => "smt_stale",
+            StateSpace::ProofReceipt => "proof_receipt",
+        }
+    }
+
+    fn all_descriptors() -> Vec<ColumnFamilyDescriptor> {
+        use StateSpace::*;
+        let cf_name = <StateSpace as StateSpaceExt<C>>::cf_name;
+        vec![
+            ColumnFamilyDescriptor::new(cf_name(&StateVersion), C::cf_data_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&StatePtrLatest), C::cf_latest_ptr_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&StatePtrRollback), C::cf_rollback_ptr_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&BatchMetadata), C::cf_batch_metadata_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&Metadata), C::cf_metas_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&SmtNode), C::cf_smt_node_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&SmtStale), C::cf_smt_stale_opts()),
+            ColumnFamilyDescriptor::new(cf_name(&ProofReceipt), C::cf_proof_receipt_opts()),
+        ]
+    }
+}

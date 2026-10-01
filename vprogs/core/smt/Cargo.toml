@@ -1,0 +1,16 @@
+[package]
+edition.workspace = true
+name              = "vprogs-core-smt"
+version.workspace = true
+
+[dependencies]
+tap                 = { workspace = true }
+vprogs-core-codec   = { workspace = true }
+vprogs-core-hashing = { workspace = true }
+vprogs-core-types   = { workspace = true }
+zerocopy            = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace                     = true
+vprogs-storage-rocksdb-store.workspace = true
+vprogs-storage-types.workspace         = true

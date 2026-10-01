@@ -1,0 +1,14 @@
+[package]
+edition.workspace = true
+name              = "vprogs-scheduling-execution-workers"
+version.workspace = true
+
+[dependencies]
+crossbeam-deque.workspace       = true
+crossbeam-queue.workspace       = true
+crossbeam-utils.workspace       = true
+fastrand.workspace              = true
+intrusive-collections.workspace = true
+tap.workspace                   = true
+vprogs-core-atomics.workspace   = true
+vprogs-core-macros.workspace    = true

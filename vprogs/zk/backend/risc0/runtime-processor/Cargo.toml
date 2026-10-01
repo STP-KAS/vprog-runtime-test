@@ -1,0 +1,63 @@
+[package]
+edition = "2021"
+name    = "vprogs-zk-backend-risc0-runtime-processor"
+version = "0.1.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "vprogs-zk-backend-risc0-runtime-processor"
+path = "src/main.rs"
+
+[features]
+default = []
+
+# Routes the host-side prover (the e2e `prove + verify` path) to the CUDA
+# backend on a GPU machine. The test gate stays `dev_mode_enabled()`
+# (`RISC0_DEV_MODE`), NEVER `cfg(feature = "cuda")` — this feature only selects
+# the prover backend, it does not change which assertions run. Off for the guest
+# ELF build: the Docker build never passes `--features cuda`, so the guest
+# `risc0-zkvm` dependency stays `std`-only.
+#   GPU box: RISC0_DEV_MODE=0 cargo test --manifest-path \
+#     zk/backend/risc0/runtime-processor/Cargo.toml --test e2e --features cuda -- --nocapture
+cuda = ["risc0-zkvm/cuda"]
+
+[dependencies]
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+# BIP-340 schnorr verification. For risc0 guest builds, pin to a precompile-accelerated
+# fork via `[patch.crates-io]` (e.g. risc0/RustCrypto-elliptic-curves) when wiring up
+# the docker build.
+k256 = { version = "0.13", default-features = false, features = ["schnorr"] }
+risc0-zkvm = { version = "3.0", default-features = false, features = ["std"] }
+signature = { version = "2", default-features = false }
+vprogs-core-codec = { path = "../../../../core/codec" }
+vprogs-core-types = { path = "../../../../core/types", default-features = false }
+vprogs-l1-utils = { path = "../../../../l1/utils" }
+vprogs-zk-abi = { path = "../../../abi", default-features = false }
+vprogs-zk-backend-risc0-api = { path = "../api", default-features = false, features = [
+  "guest",
+] }
+
+[dev-dependencies]
+# Host-side dev-deps for the e2e test harness. We talk to risc0-zkvm directly
+# (executor + v1compat kernel wrap) instead of going through the api crate's
+# Backend, which would drag in the covenant/vm crates and their kaspa-consensus
+# transitive deps. The abi crate needs `host` for Outputs::decode.
+blake3              = "1"
+rand                = "0.8"
+risc0-binfmt        = "3.0.4"
+risc0-zkos-v1compat = "2.2.2"
+risc0-zkvm          = { version = "3.0", features = ["std", "prove"] }
+secp256k1           = { version = "0.29.1", features = ["rand-std"] }
+vprogs-core-types   = { path = "../../../../core/types" }
+vprogs-l1-utils     = { path = "../../../../l1/utils" }
+vprogs-zk-abi       = { path = "../../../abi", features = ["host"] }
+
+# Kaspa types used to build a real V1 prev-tx fixture in the witness e2e
+# test.
+# Using `transaction_v1_rest_preimage` from kaspa-consensus-core avoids
+# hand-rolling the rest_preimage encoding — and matches the format the
+# runtime's `tx_inputs` parser expects.
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "master" }
+kaspa-txscript       = { git = "https://github.com/kaspanet/rusty-kaspa", branch = "master" }

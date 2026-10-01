@@ -1,0 +1,8 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-instruction"
+version.workspace = true
+
+[dependencies]
+vprogs-transaction-runtime-address.workspace     = true
+vprogs-transaction-runtime-program-arg.workspace = true

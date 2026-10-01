@@ -1,0 +1,10 @@
+[package]
+edition.workspace = true
+name              = "vprogs-storage-manager"
+version.workspace = true
+
+[dependencies]
+crossbeam-queue.workspace      = true
+crossbeam-utils.workspace      = true
+vprogs-core-macros.workspace   = true
+vprogs-storage-types.workspace = true

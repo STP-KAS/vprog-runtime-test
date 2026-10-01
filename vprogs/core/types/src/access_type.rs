@@ -1,0 +1,27 @@
+use vprogs_core_codec::Error;
+use zerocopy::{Immutable, IntoBytes, KnownLayout, TryFromBytes, Unaligned};
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(TryFromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
+pub enum AccessType {
+    Read = 0,
+    Write = 1,
+}
+
+impl From<AccessType> for u8 {
+    fn from(s: AccessType) -> Self {
+        s as u8
+    }
+}
+
+impl TryFrom<u8> for AccessType {
+    type Error = Error;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(AccessType::Read),
+            1 => Ok(AccessType::Write),
+            _ => Err(Error::Decode("unknown access type")),
+        }
+    }
+}

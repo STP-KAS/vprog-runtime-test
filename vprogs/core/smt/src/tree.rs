@@ -1,0 +1,80 @@
+use alloc::vec::Vec;
+
+use vprogs_core_codec::Result;
+use vprogs_core_hashing::Hasher;
+use vprogs_core_types::ResourceId;
+
+use crate::{
+    Commitment, EMPTY_HASH, Key, Node, WriteBatch, proving::ProofBuilder, updater::Updater,
+};
+
+/// Number of levels in the tree (256-bit keys).
+pub const DEPTH: usize = 256;
+
+/// Versioned Sparse Merkle Tree with shortcut leaves, pruning, and multi-proofs.
+///
+/// Implementors only need to provide `node` and `prune`; all tree operations (commits, proofs,
+/// root lookups) are default methods.
+pub trait Tree: Sized {
+    /// The hash function used for node and leaf hashing.
+    type Hasher: Hasher;
+
+    /// A read snapshot fixing which node versions are visible for one operation's whole traversal.
+    type Snapshot;
+
+    // -- Required methods (implementors must provide these) --
+
+    /// Captures a read snapshot for an operation; every `node` lookup in that operation shares it.
+    fn snapshot(&self) -> Self::Snapshot;
+
+    /// Returns the node data and version of the latest SMT node at `key` where version <=
+    /// `max_version`, as seen by `snapshot`, or `None` if no such node exists.
+    fn node(&self, key: &Key, max_version: u64, snapshot: &Self::Snapshot) -> Option<(u64, Node)>;
+
+    /// Prunes stale nodes for the given version, deleting superseded nodes and their stale markers.
+    fn prune(&self, wb: &mut impl WriteBatch, version: u64);
+
+    // -- Default methods --
+
+    /// Returns the state root hash at the given version, or `EMPTY_HASH` if no root exists.
+    fn root(&self, version: u64) -> [u8; 32] {
+        // Version 0 is pre-genesis - no tree exists yet.
+        if version == 0 {
+            return EMPTY_HASH;
+        }
+
+        // Create a snapshot of the current SMT.
+        let snapshot = self.snapshot();
+
+        // Look up the root node and extract its hash.
+        self.node(&Key::ROOT, version, &snapshot).map(|(_, d)| *d.hash()).unwrap_or(EMPTY_HASH)
+    }
+
+    /// Commits state diffs to the tree at the given version, returning the new root hash.
+    ///
+    /// No-op for empty diffs - returns the previous version's root. Panics if `version` is 0
+    /// (version 0 is reserved as pre-genesis).
+    fn update(
+        &self,
+        wb: &mut impl WriteBatch,
+        commitments: Vec<Commitment>,
+        version: u64,
+    ) -> [u8; 32] {
+        assert!(version > 0, "version 0 is reserved as pre-genesis");
+
+        // Empty commitments produce no tree changes - carry forward the previous root.
+        if commitments.is_empty() {
+            return self.root(version - 1);
+        }
+
+        // Apply leaf mutations and return the new root hash.
+        Updater::apply(self, wb, version, commitments)
+    }
+
+    /// Proves the state of the given keys at a specific version.
+    ///
+    /// Returns the wire-encoded proof (see `Proof::decode()`) or an error for duplicates keys.
+    fn prove(&self, keys: &[ResourceId], version: u64) -> Result<Vec<u8>> {
+        ProofBuilder::build(self, version, keys)
+    }
+}

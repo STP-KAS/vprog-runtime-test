@@ -1,0 +1,8 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-program"
+version.workspace = true
+
+[dependencies]
+borsh.workspace                                   = true
+vprogs-transaction-runtime-program-type.workspace = true

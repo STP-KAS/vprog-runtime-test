@@ -1,0 +1,7 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-auth-context"
+version.workspace = true
+
+[dependencies]
+vprogs-transaction-runtime-pubkey.workspace = true

@@ -1,0 +1,40 @@
+use vprogs_core_types::AccessType;
+use vprogs_l1_types::{ChainBlockMetadata, L1Transaction};
+use vprogs_scheduling_scheduler::{Processor, TransactionContext};
+use vprogs_storage_types::Store;
+
+/// A minimal processor for testing the node framework.
+#[derive(Clone)]
+pub struct TestNodeVm;
+
+impl<S: Store> Processor<S> for TestNodeVm {
+    fn process_transaction(
+        &self,
+        ctx: &mut TransactionContext<S, Self>,
+    ) -> Result<(), Self::Error> {
+        let (tx, resources) = ctx.parts_mut();
+        let tx_id_bytes = tx.id().as_bytes();
+        for resource in resources {
+            if resource.access_metadata().access_type == AccessType::Write {
+                resource.data_mut().extend_from_slice(&tx_id_bytes);
+            }
+        }
+        Ok(())
+    }
+
+    // This test VM does not prove, so its receipt-cache image ids are unset.
+    fn tx_image_id(&self) -> [u8; 32] {
+        [0u8; 32]
+    }
+
+    fn batch_image_id(&self) -> [u8; 32] {
+        [0u8; 32]
+    }
+
+    type Transaction = L1Transaction;
+    type TransactionArtifact = ();
+    type BatchArtifact = ();
+    type AggregatorArtifact = ();
+    type BatchMetadata = ChainBlockMetadata;
+    type Error = ();
+}

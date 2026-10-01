@@ -1,0 +1,10 @@
+[package]
+edition.workspace = true
+name              = "vprogs-transaction-runtime-signature-lock"
+version.workspace = true
+
+[dependencies]
+borsh.workspace                                           = true
+vprogs-transaction-runtime-auth-context.workspace         = true
+vprogs-transaction-runtime-builtin-capabilities.workspace = true
+vprogs-transaction-runtime-pubkey.workspace               = true

@@ -1,0 +1,67 @@
+use alloc::{format, string::String};
+use core::fmt::Display;
+
+use vprogs_core_codec::{Reader, Writer};
+
+/// Errors from ZK ABI operations.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum Error {
+    /// Error code returned by the guest program.
+    #[error("guest error: code {0}")]
+    Guest(u32),
+    /// Wire format decode error.
+    #[error("decode error: {0}")]
+    Decode(String),
+}
+
+impl Error {
+    /// Wire discriminant for a guest error.
+    const GUEST: u8 = 0x00;
+    /// Wire discriminant for a decode error.
+    const DECODE: u8 = 0x01;
+
+    /// Decodes an error, advancing `buf` past the consumed bytes.
+    pub fn decode(buf: &mut &[u8]) -> Result<Self> {
+        // Dispatch based on discriminant.
+        match buf.byte("error_variant")? {
+            Self::GUEST => Ok(Self::Guest(buf.le_u32("error_code")?)),
+            Self::DECODE => Ok(Self::Decode(buf.string("error_msg")?.into())),
+            _ => Err(Error::Decode("invalid error discriminant".into())),
+        }
+    }
+
+    /// Encodes the error to the given writer.
+    pub fn encode(&self, w: &mut impl Writer) {
+        match self {
+            Self::Guest(code) => {
+                // Write discriminant and code.
+                w.write(&[Self::GUEST]);
+                w.write(&code.to_le_bytes());
+            }
+            Self::Decode(msg) => {
+                // Write discriminant, length, and UTF-8 message bytes.
+                w.write(&[Self::DECODE]);
+                w.write(&(msg.len() as u32).to_le_bytes());
+                w.write(msg.as_bytes());
+            }
+        }
+    }
+}
+
+impl From<vprogs_core_codec::Error> for Error {
+    fn from(e: vprogs_core_codec::Error) -> Self {
+        match e {
+            vprogs_core_codec::Error::Decode(field) => Self::Decode(field.into()),
+            vprogs_core_codec::Error::ZeroCopy(msg) => Self::Decode(msg),
+        }
+    }
+}
+
+impl<A: Display, S: Display, V: Display> From<zerocopy::ConvertError<A, S, V>> for Error {
+    fn from(e: zerocopy::ConvertError<A, S, V>) -> Self {
+        Self::Decode(format!("zerocopy: {e}"))
+    }
+}
+
+/// Result type for ZK ABI operations.
+pub type Result<T> = core::result::Result<T, Error>;

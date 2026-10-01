@@ -1,0 +1,165 @@
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+use arc_swap::ArcSwapOption;
+use vprogs_core_atomics::AtomicAsyncLatch;
+use vprogs_core_macros::smart_pointer;
+use vprogs_core_types::{BatchMetadata, ResourceId, SchedulerTransaction};
+use vprogs_state_proof_receipt::{Prefix, TxKey};
+use vprogs_storage_types::Store;
+
+use crate::{
+    AccessHandle, ReceiptRead, ResourceAccess, ScheduledBatch, ScheduledBatchRef, Scheduler,
+    StateDiff, TransactionContext, processor::Processor,
+};
+
+/// A transaction progressing through the scheduler's execution pipeline.
+///
+/// Wraps a user-submitted transaction with its resource access handles, execution state, and a
+/// back-reference to the owning batch. Derefs to the inner `SchedulerTransaction`.
+#[smart_pointer(deref(tx))]
+pub struct ScheduledTransaction<S: Store, P: Processor<S>> {
+    /// Processor used to execute this transaction.
+    processor: P,
+    /// Weak reference to the owning batch.
+    batch: ScheduledBatchRef<S, P>,
+    /// Resources accessed by this transaction, one per declared access.
+    resources: Vec<ResourceAccess<S, P>>,
+    /// Number of resources whose data hasn't been resolved yet.
+    pending_resources: AtomicU64,
+    /// Transaction artifact (e.g. proof receipt), set after processing.
+    artifact: ArcSwapOption<P::TransactionArtifact>,
+    /// Zero-based contiguous position of this tx within its batch's tx list.
+    batch_position: u32,
+    /// The user-submitted transaction (deref target).
+    tx: SchedulerTransaction<P::Transaction>,
+}
+
+impl<S: Store, P: Processor<S>> ScheduledTransaction<S, P> {
+    /// Returns the weak reference to the owning batch.
+    pub fn batch(&self) -> &ScheduledBatchRef<S, P> {
+        &self.batch
+    }
+
+    /// Returns the resources accessed by this transaction.
+    pub fn resources(&self) -> &[ResourceAccess<S, P>] {
+        &self.resources
+    }
+
+    /// Returns the artifact produced by this transaction.
+    ///
+    /// # Panics
+    /// Panics if called before [`publish_artifact`](Self::publish_artifact).
+    pub fn artifact(&self) -> Arc<P::TransactionArtifact> {
+        self.artifact.load_full().expect("artifact not ready")
+    }
+
+    /// Looks up this transaction's cached receipt, returning a handle that resolves to the
+    /// deserialized receipt, or `None` on a cache miss. Served by the read worker through the
+    /// owning batch's storage handle.
+    pub fn read_tx_receipt(&self) -> ReceiptRead<S, P, P::TransactionArtifact> {
+        let batch = self.batch.upgrade().expect("owning batch dropped");
+        batch.submit_read_receipt(self.tx_key(&batch))
+    }
+
+    /// Stores this transaction's receipt through the owning batch's write worker, returning a latch
+    /// that opens once it commits.
+    pub fn write_tx_receipt(&self, receipt: P::TransactionArtifact) -> AtomicAsyncLatch {
+        let batch = self.batch.upgrade().expect("owning batch dropped");
+        batch.submit_store_receipt(self.tx_key(&batch), receipt)
+    }
+
+    /// The per-transaction receipt key at the owning batch's coordinate and this transaction's
+    /// merge index.
+    fn tx_key(&self, batch: &ScheduledBatch<S, P>) -> TxKey {
+        TxKey {
+            prefix: Prefix { checkpoint_index: batch.checkpoint().index().into() },
+            block_hash: batch.checkpoint().metadata().block_hash(),
+            image_id: self.processor.tx_image_id(),
+            merge_idx: self.merge_idx.into(),
+        }
+    }
+
+    /// Publishes this transaction's artifact. `None` skips without storing an artifact.
+    pub fn publish_artifact(&self, artifact: Option<P::TransactionArtifact>) {
+        if let Some(artifact) = artifact {
+            self.artifact.store(Some(Arc::new(artifact)));
+        }
+
+        // Always advance the batch's pending artifact counter to ensure the latch will open.
+        if let Some(batch) = self.batch.upgrade() {
+            batch.decrease_pending_tx_artifacts();
+        }
+    }
+
+    pub(crate) fn new(
+        scheduler: &mut Scheduler<S, P>,
+        state_diffs: &mut Vec<StateDiff<S, P>>,
+        batch: ScheduledBatchRef<S, P>,
+        batch_position: u32,
+        tx: SchedulerTransaction<P::Transaction>,
+        resource_indices: &BTreeMap<ResourceId, u32>,
+    ) -> Self {
+        Self(Arc::new_cyclic(|this: &Weak<ScheduledTransactionData<S, P>>| {
+            let this = ScheduledTransactionRef(this.clone());
+            let resources = scheduler.resources(&tx, this, &batch, state_diffs, resource_indices);
+            ScheduledTransactionData {
+                processor: scheduler.processor().clone(),
+                pending_resources: AtomicU64::new(resources.len() as u64),
+                artifact: ArcSwapOption::empty(),
+                batch,
+                batch_position,
+                tx,
+                resources,
+            }
+        }))
+    }
+
+    pub(crate) fn decrease_pending_resources(self) {
+        if self.pending_resources.fetch_sub(1, Ordering::Relaxed) == 1 {
+            if let Some(batch) = self.batch.upgrade() {
+                batch.push_available_tx(&self)
+            }
+        }
+    }
+
+    pub(crate) fn execute(&self) {
+        if let Some(batch) = self.batch.upgrade() {
+            let batch_index = batch.checkpoint().index();
+            let mut ctx = TransactionContext::new(
+                &self.tx,
+                self.batch_position,
+                &batch,
+                self.resources.iter().map(|a| AccessHandle::new(a, batch_index)).collect(),
+            );
+
+            // If the batch was canceled, roll back all changes and exit early.
+            if batch.canceled() {
+                ctx.rollback_all();
+                batch.decrease_pending_txs();
+                return;
+            }
+
+            // Process the transaction using the processor.
+            match self.processor.process_transaction(&mut ctx) {
+                Ok(()) => ctx.commit_all(),
+                // TODO: Handle errors (e.g. store with transaction)
+                Err(_) => ctx.rollback_all(),
+            }
+
+            // Notify the batch that this transaction has been processed.
+            batch.decrease_pending_txs();
+        }
+    }
+}
+
+impl<S: Store, P: Processor<S>> ScheduledTransactionRef<S, P> {
+    pub(crate) fn belongs_to_batch(&self, batch: &ScheduledBatchRef<S, P>) -> bool {
+        self.upgrade().is_some_and(|tx| tx.batch() == batch)
+    }
+}

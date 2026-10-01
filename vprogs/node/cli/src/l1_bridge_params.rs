@@ -1,0 +1,65 @@
+use std::time::Duration;
+
+use clap::Args;
+use kaspa_consensus_core::subnets::SubnetworkId;
+use serde::{Deserialize, Serialize};
+use vprogs_l1_bridge::L1BridgeConfig;
+use vprogs_l1_types::{Hash, NetworkId};
+
+use crate::extensions::ConnectStrategyExt;
+
+/// CLI arguments for the L1 bridge (Kaspa node connection and reorg filtering).
+#[derive(Args, Serialize, Deserialize)]
+#[command(next_help_heading = "L1 Bridge")]
+pub struct L1BridgeParams {
+    /// WebSocket URL for the Kaspa L1 node (e.g. ws://localhost:17110).
+    /// Omit to use the public resolver.
+    #[arg(long = "l1-bridge-url")]
+    pub url: Option<String>,
+    /// Target network: mainnet, testnet-10, testnet-11, devnet, simnet.
+    #[arg(long = "l1-bridge-network-id", default_value_t = L1BridgeConfig::default().network_id)]
+    pub network_id: NetworkId,
+    /// L1 connection timeout in milliseconds.
+    #[arg(long = "l1-bridge-connect-timeout-ms", default_value_t = L1BridgeConfig::default().connect_timeout_ms)]
+    pub connect_timeout_ms: u64,
+    /// Connection strategy: retry (block until connected) or fallback (fail fast).
+    #[arg(long = "l1-bridge-connect-strategy", default_value_t = L1BridgeConfig::default().connect_strategy.to_string())]
+    pub connect_strategy: String,
+    /// Reorg filter half-life in seconds. Observed reorg depths accumulate into a threshold
+    /// that halves every half-life. Set to 0 to disable.
+    #[arg(long = "l1-bridge-filter-half-life-secs", default_value_t = L1BridgeConfig::default().filter_half_life.as_secs())]
+    pub filter_half_life_secs: u64,
+    /// Subnetwork id (40-char hex) this node binds to. When set, the bridge drops every accepted
+    /// tx whose subnetwork id doesn't match. Omit to observe every subnetwork (generic-observer
+    /// mode).
+    #[arg(long = "l1-bridge-subnetwork-id")]
+    pub subnetwork_id: Option<SubnetworkId>,
+    /// Blue-score window within which a lane stays active without new transactions.
+    #[arg(long = "l1-bridge-finality-depth", default_value_t = L1BridgeConfig::default().finality_depth)]
+    pub finality_depth: u64,
+    /// Covenant id (64-char hex) whose last settlement gets tracked by each chain block's
+    /// metadata. Omit to disable covenant tracking.
+    #[arg(long = "l1-bridge-covenant-id")]
+    pub covenant_id: Option<Hash>,
+}
+
+impl L1BridgeParams {
+    /// Converts CLI params into an [`L1BridgeConfig`] (start point comes from persisted state).
+    pub fn into_config(self) -> L1BridgeConfig {
+        L1BridgeConfig {
+            url: self.url,
+            network_id: self.network_id,
+            connect_timeout_ms: self.connect_timeout_ms,
+            // Kept as String upstream because `ConnectStrategy` lacks `Display`/`Serialize`.
+            connect_strategy: self.connect_strategy.parse().expect("invalid connect strategy"),
+            filter_half_life: Duration::from_secs(self.filter_half_life_secs),
+            subnetwork_id: self.subnetwork_id,
+            finality_depth: self.finality_depth,
+            covenant_id: self.covenant_id,
+            seed_depth: None,
+            start_from: None,
+            tip_daa: None,
+            settlement_observer: None,
+        }
+    }
+}

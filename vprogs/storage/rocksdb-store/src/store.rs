@@ -1,0 +1,163 @@
+use std::{marker::PhantomData, path::Path, sync::Arc};
+
+use rocksdb::{DB, DBIteratorWithThreadMode, Direction, IteratorMode};
+use vprogs_core_smt::{Key, Node, StaleNode, Tree, WriteBatch as SmtWriteBatch};
+use vprogs_storage_canonical_chain::{CanonicalChain, CanonicalChainSnapshot};
+use vprogs_storage_types::{PrefixIterator, StateSpace, Store};
+
+use crate::{
+    Config, DefaultConfig, WriteBatch, key_ext::KeyExt, stale_node_ext::StaleNodeExt,
+    state_space_ext::StateSpaceExt,
+};
+
+/// A RocksDB-backed [`Store`], with one column family per [`StateSpace`].
+pub struct RocksDbStore<C: Config = DefaultConfig> {
+    /// The shared RocksDB handle.
+    db: Arc<DB>,
+    /// Write options applied to every commit.
+    write_opts: Arc<rocksdb::WriteOptions>,
+    /// In-memory canonical-chain oracle, shared by clones; driven by the restored writer.
+    canonical: CanonicalChain,
+    /// Binds the `Config` type parameter, used only through its static options.
+    _marker: PhantomData<C>,
+}
+
+impl<C: Config> RocksDbStore<C> {
+    /// Opens the store at `path`, creating the database and column families if absent.
+    pub fn open<P: AsRef<Path>>(path: P) -> Self {
+        let mut db_opts = C::db_opts();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+
+        Self {
+            db: Arc::new(
+                match DB::open_cf_descriptors(
+                    &db_opts,
+                    path,
+                    <StateSpace as StateSpaceExt<C>>::all_descriptors(),
+                ) {
+                    Ok(db) => db,
+                    Err(e) => panic!("failed to open RocksDB: {e}"),
+                },
+            ),
+            write_opts: Arc::new(C::write_opts()),
+            canonical: CanonicalChain::default(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// The column-family handle for `ns`; panics if the CF is missing.
+    fn cf(&self, ns: &StateSpace) -> &rocksdb::ColumnFamily {
+        let cf_name = <StateSpace as StateSpaceExt<C>>::cf_name;
+        match self.db.cf_handle(cf_name(ns)) {
+            Some(cf) => cf,
+            None => panic!("missing column family '{}'", cf_name(ns)),
+        }
+    }
+}
+
+impl<C: Config> Store for RocksDbStore<C> {
+    type WriteBatch = WriteBatch<C>;
+
+    fn get(&self, state_space: StateSpace, key: &[u8]) -> Option<Vec<u8>> {
+        match self.db.get_cf(self.cf(&state_space), key) {
+            Ok(res) => res,
+            Err(e) => panic!("rocksdb get failed: {e}"),
+        }
+    }
+
+    fn write_batch(&self) -> WriteBatch<C> {
+        WriteBatch::new(self.db.clone())
+    }
+
+    fn commit(&self, write_batch: WriteBatch<C>) {
+        if let Err(err) = self.db.write_opt(write_batch.into(), &self.write_opts) {
+            panic!("rocksdb write-batch commit failed: {err}");
+        }
+    }
+
+    fn prefix_iter(&self, state_space: StateSpace, prefix: &[u8]) -> PrefixIterator<'_> {
+        let cf = self.cf(&state_space);
+
+        // Empty prefix = full scan; the fixed-prefix CFs need total-order seek to span all keys.
+        if prefix.is_empty() {
+            let mut read_opts = rocksdb::ReadOptions::default();
+            read_opts.set_total_order_seek(true);
+            let iter = self.db.iterator_cf_opt(cf, read_opts, IteratorMode::Start);
+            return Box::new(RocksDbPrefixIter { inner: iter });
+        }
+
+        let mut read_opts = rocksdb::ReadOptions::default();
+        // Ensure iteration stops when keys no longer share the prefix.
+        read_opts.set_prefix_same_as_start(true);
+
+        let mode = IteratorMode::From(prefix, Direction::Forward);
+        let iter = self.db.iterator_cf_opt(cf, read_opts, mode);
+        Box::new(RocksDbPrefixIter { inner: iter })
+    }
+
+    fn canonical_chain(&self) -> CanonicalChain {
+        self.canonical.clone()
+    }
+}
+
+impl<C: Config> Tree for RocksDbStore<C> {
+    type Hasher = vprogs_core_hashing::Sha256;
+    type Snapshot = Arc<CanonicalChainSnapshot>;
+
+    fn snapshot(&self) -> Arc<CanonicalChainSnapshot> {
+        self.canonical.snapshot()
+    }
+
+    fn node(&self, key: &Key, max_version: u64, snapshot: &Self::Snapshot) -> Option<(u64, Node)> {
+        let versions_tracked = snapshot.tip() > 0;
+
+        // Seek the latest canonical version below `max_version`.
+        let iter = self.prefix_iter(StateSpace::SmtNode, &key.encode_with_version(max_version));
+        for (raw_key, raw_value) in iter {
+            let version = Key::decode_version(&raw_key).expect("corrupted smt node key");
+            if !versions_tracked || snapshot.is_canonical(version) {
+                let node = Node::decode(&mut raw_value.as_ref()).expect("corrupted smt node");
+                return Some((version, node));
+            }
+        }
+        None
+    }
+
+    fn prune(&self, wb: &mut impl SmtWriteBatch, version: u64) {
+        for (raw_key, raw_value) in self.prefix_iter(StateSpace::SmtStale, &version.to_be_bytes()) {
+            let node_key = StaleNode::decode_key(&raw_key).expect("corrupted stale key");
+            let node_version = StaleNode::decode_value(&raw_value).expect("corrupted stale value");
+
+            wb.delete_node(&node_key, node_version);
+            wb.delete_stale_node(&StaleNode::new(version, node_key, node_version));
+        }
+    }
+}
+
+impl<C: Config> Clone for RocksDbStore<C> {
+    fn clone(&self) -> Self {
+        RocksDbStore {
+            db: self.db.clone(),
+            write_opts: self.write_opts.clone(),
+            canonical: self.canonical.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// Wrapper around RocksDB's prefix iterator that unwraps Results into panics.
+struct RocksDbPrefixIter<'a> {
+    inner: DBIteratorWithThreadMode<'a, DB>,
+}
+
+impl Iterator for RocksDbPrefixIter<'_> {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|res| match res {
+            Ok((k, v)) => (k.to_vec(), v.to_vec()),
+            Err(e) => panic!("rocksdb prefix iteration failed: {e}"),
+        })
+    }
+}
