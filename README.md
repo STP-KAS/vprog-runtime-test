@@ -12,6 +12,8 @@ Two existing users, both unlocked. The lower resource id pays the higher one. A 
 
 This is not a proof. The ELF is not executed. `node/vm` `process_transaction` on master is still `todo!`, so the node does not run this path.
 
+The 9 Oct 2026 workshop lab is [STP-KAS/vprog-sovereign](https://github.com/STP-KAS/vprog-sovereign). This checkout stays on `f9b84a8`. [WORKSHOP.md](WORKSHOP.md).
+
 [STP-KAS/quiet-lane](https://github.com/STP-KAS/quiet-lane) is a separate model of the settler wake. It does not call this guest.
 
 ## Test
