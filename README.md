@@ -39,4 +39,4 @@ A pass is `3 passed`. Balances 50 and 7, amount 20, land at 30 and 27. Amount 51
 | Hasher | The ELF entry names `vprogs_zk_backend_risc0_api::Sha256`. With the `guest` feature that is the RISC0 precompile. This host check calls `process_transaction` with `vprogs_core_hashing::Sha256`, which is the type that api crate exports when `guest` is off. |
 | Proof | Nothing here is proved. |
 
-Intentions are good; thought process is questionable. STP remains delusional. Si vis pacem, para bellum.
+Si vis pacem, para bellum.
